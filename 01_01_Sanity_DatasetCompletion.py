@@ -90,34 +90,34 @@ def compute_completion(case_ids, tracks, folder= data_folder, ignore_sec= 20 * 6
 def plot_completion_heatmap(completion, case_ids, tracks):
 	""" Plots the Completion Matrix as a Heatmap.
 	Tracks on the Y Axis, Cases on the X Axis"""
-    fig, ax = plt.subplots(figsize=(14, 8))
+	fig, ax = plt.subplots(figsize=(14, 8))
 
-    im = ax.imshow(
-        completion,
-        aspect="auto",
-        origin="upper",
-        vmin=0,
-        vmax=100,
-        cmap="viridis",
-    )
+	im = ax.imshow(
+		completion,
+		aspect="auto",
+		origin="upper",
+		vmin=0,
+		vmax=100,
+		cmap="viridis",
+	)
 
-    ax.set_xlabel("Case ID")
-    ax.set_ylabel("Track")
+	ax.set_xlabel("Case ID")
+	ax.set_ylabel("Track")
 
-    ax.set_xticks(np.arange(len(case_ids)))
-    ax.set_xticklabels(case_ids, rotation=90, fontsize=5)
+	ax.set_xticks(np.arange(len(case_ids)))
+	ax.set_xticklabels(case_ids, rotation=90, fontsize=5)
 
-    ax.set_yticks(np.arange(len(tracks)))
-    ax.set_yticklabels(tracks, fontsize=6)
+	ax.set_yticks(np.arange(len(tracks)))
+	ax.set_yticklabels(tracks, fontsize=6)
 
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Data completeness (%)")
+	cbar = fig.colorbar(im, ax=ax)
+	cbar.set_label("Data completeness (%)")
 
-    plt.tight_layout()
-    plt.show()
+	plt.tight_layout()
+	plt.show()
 
 
-# 4) Plot case lengths
+	# 4) Plot case lengths
 
 def plot_case_durations(case_ids, case_durations_sec):
     """
