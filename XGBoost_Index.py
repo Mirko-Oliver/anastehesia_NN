@@ -52,7 +52,7 @@ Dynamic_Features = [
 #'Orchestra/RFTN20_CT', 
 #'Orchestra/RFTN20_RATE', 
 #'Orchestra/RFTN20_VOL', 
-'BIS/EMG', 
+#'BIS/EMG', 
 'BIS/SEF', 
 #'BIS/SQI', 
 'BIS/SR', 
@@ -258,7 +258,7 @@ def load_clinical_info_map(static_cols = Static_Features):
             info[cid] = {c: row.get(c) for c in static_cols}
     return info
 
-def add_static_features(df: pd.DataFrame, caseid: str, clinical_map: Dict[str, Dict[str, object]]) -> pd.DataFrame:
+def add_static_features(df, caseid, clinical_map):
     """
     Adds static columns to every row of df for this caseid.
     """
@@ -268,7 +268,7 @@ def add_static_features(df: pd.DataFrame, caseid: str, clinical_map: Dict[str, D
         df[k] = v
     return df
     
-def coerce_static_types(df: pd.DataFrame) -> pd.DataFrame:
+def coerce_static_types(df):
     if "age" in df.columns:
         df["age"] = pd.to_numeric(df["age"], errors="coerce")
     if "sex" in df.columns:
@@ -305,7 +305,6 @@ def print_metrics_by_sex(name, X, y_true, y_pred, features):
 	sex_i = features.index("sex")
 	sex = X[:, sex_i]
 
-	# sex expected as 0/1 (float32). Ignore NaNs.
 	mask_m = (sex == 1)
 	mask_f = (sex == 0)
 
@@ -316,7 +315,27 @@ def print_metrics_by_sex(name, X, y_true, y_pred, features):
 		print(f"[SEX] {name} sex=1 (M) n={nm:7d}  MAE={mae(y_true[mask_m], y_pred[mask_m]):.4f}  RMSE={rmse(y_true[mask_m], y_pred[mask_m]):.4f}")
 	if nf > 0:
 		print(f"[SEX] {name} sex=0 (F) n={nf:7d}  MAE={mae(y_true[mask_f], y_pred[mask_f]):.4f}  RMSE={rmse(y_true[mask_f], y_pred[mask_f]):.4f}")
-    
+
+def save_model_bundle(model, features, out_dir, bin_edges):
+	os.makedirs(out_dir, exist_ok=True)
+
+	model_path = os.path.join(out_dir, "bis_xgb_model.json")
+	meta_path  = os.path.join(out_dir, "bis_xgb_meta.json")
+
+	model.get_booster().save_model(model_path)
+
+	meta = {
+		"features": features,
+		"target": TARGET_COL,
+		"bis_edges": bin_edges.tolist(),
+	}
+
+	with open(meta_path, "w", encoding="utf-8") as f:
+		json.dump(meta, f, indent=2)
+
+	print(f"[SAVE] model -> {model_path}")
+	print(f"[SAVE] meta  -> {meta_path}")
+	    
 if __name__ == "__main__":
 	# 1) Create Map of Static Features
 	clinical_map = load_clinical_info_map(Static_Features)
@@ -374,6 +393,14 @@ if __name__ == "__main__":
 	print_metrics("TEST", y_test, y_test_pred)
 	print_metrics_by_bin("TEST", y_test, y_test_pred)
 	print_metrics_by_sex("TEST", X_test, y_test, y_test_pred, FEATURES)
+	
+	# 11) Save model bundle
+	save_model_bundle(
+		model,
+		FEATURES,
+		out_dir="model",
+		bin_edges=BIS_EDGES
+	)
 
 
 
