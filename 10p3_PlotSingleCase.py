@@ -7,6 +7,10 @@ Allows:
 - different feature sets between bundles
 - different feature order between bundles
 - different term sets / term counts / term ordering between models
+
+Adds:
+- lambda shown next to each term in the contribution heatmaps
+- shading in the top panel where raw case label != 'regular'
 """
 
 import os
@@ -17,7 +21,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 
 
 DATA_DIR = "data"
@@ -78,9 +82,8 @@ def load_case_dataframe(caseid: str, clinical_map: Dict[str, Dict[str, str]]) ->
         raise FileNotFoundError(f"Case parquet not found: {path}")
 
     df = pd.read_parquet(path)
-    df = df.loc[create_mask(df)].copy()
     if len(df) == 0:
-        raise RuntimeError(f"No rows left after mask for case {caseid}")
+        raise RuntimeError(f"Case {caseid} parquet is empty")
 
     df = add_static_features(df, str(caseid), clinical_map)
     df = coerce_static_types(df)
@@ -99,6 +102,10 @@ def load_case_arrays_from_df(
     if missing_cols:
         raise KeyError(f"Case missing feature columns: {missing_cols}")
 
+    df = df.loc[create_mask(df)].copy()
+    if len(df) == 0:
+        raise RuntimeError("No rows left after mask for requested feature set")
+
     X = df[features].to_numpy(dtype=np.float32)
     y = df[TARGET_COL].to_numpy(dtype=np.float32)
     t = df["Time"].to_numpy(dtype=float) if "Time" in df.columns else np.arange(len(df), dtype=float)
@@ -112,6 +119,46 @@ def load_case_arrays_from_df(
         raise RuntimeError("No finite rows left for requested feature set")
 
     return X, y, t
+
+
+def get_nonregular_intervals(df_case_raw: pd.DataFrame, t_min: float, t_max: float) -> List[Tuple[float, float]]:
+    """
+    Build continuous time intervals where label != 'regular'.
+    Only intervals overlapping [t_min, t_max] are returned.
+    """
+    if "Time" not in df_case_raw.columns or "label" not in df_case_raw.columns:
+        return []
+
+    df = df_case_raw[["Time", "label"]].copy()
+    df = df.sort_values("Time").reset_index(drop=True)
+    df = df[(df["Time"] >= t_min) & (df["Time"] <= t_max)].copy()
+    if len(df) == 0:
+        return []
+
+    bad = df["label"].astype(str) != "regular"
+    intervals: List[Tuple[float, float]] = []
+
+    start = None
+    prev_t = None
+
+    for t, is_bad in zip(df["Time"].to_numpy(dtype=float), bad.to_numpy(dtype=bool)):
+        if is_bad and start is None:
+            start = t
+        if not is_bad and start is not None:
+            intervals.append((start, prev_t if prev_t is not None else t))
+            start = None
+        prev_t = t
+
+    if start is not None:
+        intervals.append((start, prev_t if prev_t is not None else start))
+
+    # widen zero-width intervals a little if needed
+    fixed = []
+    for a, b in intervals:
+        if b <= a:
+            b = a + 1e-6
+        fixed.append((a, b))
+    return fixed
 
 
 # -----------------------------
@@ -189,10 +236,6 @@ def align_case_views(
     y_lin: np.ndarray,
     t_lin: np.ndarray,
 ):
-    """
-    Align two model-specific case views by Time and target value.
-    This lets models use different feature sets and therefore different finite-row masks.
-    """
     df_exp = pd.DataFrame({
         "Time": t_exp,
         "y_exp": y_exp,
@@ -208,7 +251,6 @@ def align_case_views(
     if len(merged) == 0:
         raise ValueError("No overlapping time points between the two model-specific case views")
 
-    # If duplicate times exist, keep only rows where y is effectively the same.
     same_y = np.isclose(merged["y_exp"].to_numpy(), merged["y_lin"].to_numpy(), equal_nan=False)
     merged = merged.loc[same_y].copy()
 
@@ -225,7 +267,7 @@ def align_case_views(
 
 
 # -----------------------------
-# Term contribution helpers
+# Term contribution + lambda helpers
 # -----------------------------
 def get_term_label(gam, features_used: List[str], term_idx: int) -> str:
     term = gam.terms[term_idx]
@@ -247,12 +289,52 @@ def get_term_label(gam, features_used: List[str], term_idx: int) -> str:
     return f"term_{term_idx}"
 
 
+def format_lambda_value(lam_val: Any) -> str:
+    arr = np.asarray(lam_val, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return "?"
+    if arr.size == 1:
+        x = float(arr[0])
+        return f"{x:.1e}"
+    return "[" + ",".join(f"{float(x):.1e}" for x in arr[:3]) + (",..." if arr.size > 3 else "") + "]"
+
+
+def get_term_lambda(gam, term_idx: int) -> str:
+    """
+    Best-effort mapping from term_idx to lambda.
+    Intercept has no lambda.
+    pygam stores lam per non-intercept term, so we map by counting non-intercepts.
+    """
+    try:
+        term = gam.terms[term_idx]
+        if getattr(term, "isintercept", False):
+            return "—"
+
+        non_intercept_terms = []
+        for i, t in enumerate(gam.terms):
+            if not getattr(t, "isintercept", False):
+                non_intercept_terms.append(i)
+
+        term_pos = non_intercept_terms.index(term_idx)
+        lam = gam.lam
+
+        # lam may be list-like / nested
+        if isinstance(lam, (list, tuple, np.ndarray)):
+            if term_pos < len(lam):
+                return format_lambda_value(lam[term_pos])
+
+        return format_lambda_value(lam)
+    except Exception:
+        return "?"
+
+
 def get_centered_term_contribution_matrix(
     gam,
     X: np.ndarray,
     features_used: List[str],
-) -> Tuple[List[str], np.ndarray]:
+) -> Tuple[List[str], List[str], np.ndarray]:
     labels: List[str] = []
+    lambdas: List[str] = []
     rows: List[np.ndarray] = []
 
     for term_idx, term in enumerate(gam.terms):
@@ -263,14 +345,15 @@ def get_centered_term_contribution_matrix(
             vals = np.asarray(vals).reshape(-1)
             vals = vals - np.nanmean(vals)
             labels.append(get_term_label(gam, features_used, term_idx))
+            lambdas.append(get_term_lambda(gam, term_idx))
             rows.append(vals)
         except Exception:
             continue
 
     if not rows:
-        return [], np.zeros((0, len(X)), dtype=float)
+        return [], [], np.zeros((0, len(X)), dtype=float)
 
-    return labels, np.vstack(rows)
+    return labels, lambdas, np.vstack(rows)
 
 
 def shorten_label(text: str, max_len: int = 40) -> str:
@@ -290,13 +373,17 @@ def plot_prediction_panel(
     p_exp10: Optional[np.ndarray],
     p_exp90: Optional[np.ndarray],
     caseid: str,
+    nonregular_intervals: List[Tuple[float, float]],
 ):
+    for a, b in nonregular_intervals:
+        ax.axvspan(a, b, alpha=0.125, color = 'red')
+
     ax.plot(t, y_true, linewidth=1.7, label="True BIS")
     ax.plot(t, p_lin, linewidth=1.2, label="LinearGAM prediction")
     ax.plot(t, p_exp50, linewidth=1.4, label="ExpectileGAM tau=0.5")
 
     if p_exp10 is not None and p_exp90 is not None:
-        ax.fill_between(t, p_exp10, p_exp90, alpha=0.2, label="Expectile band 0.1-0.9")
+        ax.fill_between(t, p_exp10, p_exp90, alpha=0.25, label="Expectile band 0.1-0.9")
 
     ax.set_title(f"Case {caseid}: True vs Predicted BIS")
     ax.set_xlabel("Time")
@@ -309,6 +396,7 @@ def plot_contribution_heatmap(
     ax,
     t: np.ndarray,
     labels: List[str],
+    lambdas: List[str],
     mat: np.ndarray,
     title: str,
     max_terms: int = 18,
@@ -324,6 +412,7 @@ def plot_contribution_heatmap(
 
     mat = mat[order]
     labels = [labels[i] for i in order]
+    lambdas = [lambdas[i] for i in order]
 
     vmax = shared_vmax
     if vmax is None:
@@ -341,9 +430,12 @@ def plot_contribution_heatmap(
         extent=[t[0], t[-1], mat.shape[0] - 0.5, -0.5],
     )
 
-    short_labels = [shorten_label(x, max_len=42) for x in labels]
-    ax.set_yticks(np.arange(len(short_labels)))
-    ax.set_yticklabels(short_labels, fontsize=8)
+    full_labels = [
+        f"{shorten_label(lbl, max_len=30)} | λ={lam}"
+        for lbl, lam in zip(labels, lambdas)
+    ]
+    ax.set_yticks(np.arange(len(full_labels)))
+    ax.set_yticklabels(full_labels, fontsize=8)
     ax.set_xlabel("Time")
     ax.set_ylabel("Term")
     ax.set_title(title)
@@ -370,10 +462,10 @@ def main():
     lin_features = get_features_used(lin_bundle)
 
     clinical_map = load_clinical_info_map(STATIC_FEATURES)
-    df_case = load_case_dataframe(args.caseid, clinical_map)
+    df_case_raw = load_case_dataframe(args.caseid, clinical_map)
 
-    X_case_exp, y_case_exp, t_case_exp = load_case_arrays_from_df(df_case, exp_features)
-    X_case_lin, y_case_lin, t_case_lin = load_case_arrays_from_df(df_case, lin_features)
+    X_case_exp, y_case_exp, t_case_exp = load_case_arrays_from_df(df_case_raw, exp_features)
+    X_case_lin, y_case_lin, t_case_lin = load_case_arrays_from_df(df_case_raw, lin_features)
 
     idx_exp, idx_lin, t_case, y_case = align_case_views(
         y_case_exp, t_case_exp,
@@ -383,19 +475,16 @@ def main():
     X_case_exp = X_case_exp[idx_exp]
     X_case_lin = X_case_lin[idx_lin]
 
+    nonregular_intervals = get_nonregular_intervals(df_case_raw, float(np.min(t_case)), float(np.max(t_case)))
+
     m10, m50, m90 = get_expectile_models(exp_bundle)
     linear_model = get_linear_model(lin_bundle)
 
     p10, p50, p90 = predict_ordered_expectiles(m10, m50, m90, X_case_exp)
     p_lin = linear_model.predict(X_case_lin)
 
-    if p10 is not None:
-        p10 = p10
-    if p90 is not None:
-        p90 = p90
-
-    lin_labels, lin_mat = get_centered_term_contribution_matrix(linear_model, X_case_lin, lin_features)
-    exp_labels, exp_mat = get_centered_term_contribution_matrix(m50, X_case_exp, exp_features)
+    lin_labels, lin_lambdas, lin_mat = get_centered_term_contribution_matrix(linear_model, X_case_lin, lin_features)
+    exp_labels, exp_lambdas, exp_mat = get_centered_term_contribution_matrix(m50, X_case_exp, exp_features)
 
     fig, axes = plt.subplots(
         3, 1,
@@ -413,6 +502,7 @@ def main():
         p10,
         p90,
         args.caseid,
+        nonregular_intervals,
     )
 
     plot_contribution_heatmap(
@@ -420,6 +510,7 @@ def main():
         axes[1],
         t_case,
         lin_labels,
+        lin_lambdas,
         lin_mat,
         "LinearGAM: centered signed term contributions",
         max_terms=18,
@@ -431,6 +522,7 @@ def main():
         axes[2],
         t_case,
         exp_labels,
+        exp_lambdas,
         exp_mat,
         "ExpectileGAM tau=0.5: centered signed term contributions",
         max_terms=18,
