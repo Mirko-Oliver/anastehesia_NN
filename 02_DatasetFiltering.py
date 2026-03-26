@@ -16,13 +16,14 @@ min_case_length = 90 * 60	#Minimum Case Length in Sec
 ignore_sec = 30 * 60		#ignore first and last minutes in data completion calculation 
 
 #Minimum Track Completion [%] in Minimum of Cases to keep the Track in the Dataset 
-min_track_completion = 50.0
+min_track_completion = 66.67
 min_cases = 250
 
 #Tracks That are required in a case 
 required_tracks= [
 	"BIS/BIS",
 	"Solar8000/ART_MBP",
+	"BIS/SEF"
 ]
 # The min completion of required Tracks
 req_min_completion = 50.0

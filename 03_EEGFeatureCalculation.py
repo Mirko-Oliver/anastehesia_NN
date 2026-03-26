@@ -1,6 +1,6 @@
 """
 This Script imports the EEG1 and EEG2 tracks from VitalDB and calculates the relative Bandpowers
-by Track and a average of both Tracks
+by Track and a average of both Tracks, and Relative Beta Ratio
 for any cases with existing Parquet Files in the Data Folder.
 
 the environ config and main function allow for multiprocessing of cases which increases the scripts speed significantly
@@ -45,7 +45,8 @@ BANDS = {
     "beta":  (13.0, 30.0),
     "gamma": (30.0, 45.0),
 }
-
+RBR_NUM_BAND = (30.0, 47.0)
+RBR_DEN_BAND = (11.0, 20.0)
 # Total band 
 TOTAL_BAND = (0.5, 47.0)
 
@@ -140,73 +141,80 @@ def band_power(freqs, Pavg, band):
 
 
 def rolling_psd_features_trailing(
-    x,
-    prefix,
-    epoch_s=EPOCH_LEN_S,
-    hop_s=EPOCH_HOP_S,
-    smooth_s=PSD_SMOOTH_S,
-):
-    """
-    Compute trailing-30s EEG spectral features
+	x,
+	prefix,
+	epoch_s=EPOCH_LEN_S,
+	hop_s=EPOCH_HOP_S,
+	smooth_s=PSD_SMOOTH_S,
+	):
+	"""
+	Compute trailing-30s EEG spectral features
 
-    - relative bandpowers for delta/theta/alpha/beta/gamma.
-    - `prefix` controls the column names, e.g. 'EEG1' -> EEG1_delta_rel
+	- relative bandpowers for delta/theta/alpha/beta/gamma.
+	- `prefix` controls the column names, e.g. 'EEG1' -> EEG1_delta_rel
 
-    Returns a DataFrame indexed by time_sec with columns:
-        [f'{prefix}_delta_rel', f'{prefix}_theta_rel', ...]
-    """
-    epochs = make_epochs(x, epoch_s=epoch_s, hop_s=hop_s)
-    if epochs.size == 0:
-        return pd.DataFrame()
+	Returns a DataFrame indexed by time_sec with columns:
+		[f'{prefix}_delta_rel', f'{prefix}_theta_rel', ...]
+	"""
+	epochs = make_epochs(x, epoch_s=epoch_s, hop_s=hop_s)
+	if epochs.size == 0:
+		return pd.DataFrame()
 
-    freqs, X, P = compute_epoch_spectra(epochs)
-    centers = epoch_centers_seconds(len(epochs), epoch_s=epoch_s, hop_s=hop_s)
+	freqs, X, P = compute_epoch_spectra(epochs)
+	centers = epoch_centers_seconds(len(epochs), epoch_s=epoch_s, hop_s=hop_s)
 
-    # Integer time grid 
-    t_grid = np.arange(int(np.floor(centers[-1])) + 1, dtype=int)
+	# Integer time grid 
+	t_grid = np.arange(int(np.floor(centers[-1])) + 1, dtype=int)
 
-    # Initialize empty output arrays 
-    data = {
-        f"{prefix}_delta_rel": np.full_like(t_grid, np.nan, dtype=float),
-        f"{prefix}_theta_rel": np.full_like(t_grid, np.nan, dtype=float),
-        f"{prefix}_alpha_rel": np.full_like(t_grid, np.nan, dtype=float),
-        f"{prefix}_beta_rel":  np.full_like(t_grid, np.nan, dtype=float),
-        f"{prefix}_gamma_rel": np.full_like(t_grid, np.nan, dtype=float),
-    }
+	# Initialize empty output arrays 
+	data = {
+		f"{prefix}_delta_rel": np.full_like(t_grid, np.nan, dtype=float),
+		f"{prefix}_theta_rel": np.full_like(t_grid, np.nan, dtype=float),
+		f"{prefix}_alpha_rel": np.full_like(t_grid, np.nan, dtype=float),
+		f"{prefix}_beta_rel":  np.full_like(t_grid, np.nan, dtype=float),
+		f"{prefix}_gamma_rel": np.full_like(t_grid, np.nan, dtype=float),
+		f"{prefix}_rbr": np.full_like(t_grid, np.nan, dtype=float),
+	}
 
-    for k, t in enumerate(t_grid):
-        # Trailing window [t - smooth_s, t]
-        t_end = float(t)
-        t_start = t_end - smooth_s
-        use = (centers > t_start) & (centers <= t_end)
-        if not np.any(use):
-            continue
+	for k, t in enumerate(t_grid):
+		# Trailing window [t - smooth_s, t]
+		t_end = float(t)
+		t_start = t_end - smooth_s
+		use = (centers > t_start) & (centers <= t_end)
+		if not np.any(use):
+			continue
 
-        # Average PSD across epochs in the trailing window
-        Pavg = np.nanmean(P[use, :], axis=0)
+		# Average PSD across epochs in the trailing window
+		Pavg = np.nanmean(P[use, :], axis=0)
 
-        # Total power 
-        total = band_power(freqs, Pavg, TOTAL_BAND)
-        if not (np.isfinite(total) and total > 0):
-            continue
+		# Total power 
+		total = band_power(freqs, Pavg, TOTAL_BAND)
+		if not (np.isfinite(total) and total > 0):
+			continue
 
-        # Band powers
-        delta = band_power(freqs, Pavg, BANDS["delta"])
-        theta = band_power(freqs, Pavg, BANDS["theta"])
-        alpha = band_power(freqs, Pavg, BANDS["alpha"])
-        beta  = band_power(freqs, Pavg, BANDS["beta"])
-        gamma = band_power(freqs, Pavg, BANDS["gamma"])
+		# Band powers
+		delta = band_power(freqs, Pavg, BANDS["delta"])
+		theta = band_power(freqs, Pavg, BANDS["theta"])
+		alpha = band_power(freqs, Pavg, BANDS["alpha"])
+		beta  = band_power(freqs, Pavg, BANDS["beta"])
+		gamma = band_power(freqs, Pavg, BANDS["gamma"])
+		
+		p_num = band_power(freqs, Pavg, RBR_NUM_BAND)  # 30-47
+		p_den = band_power(freqs, Pavg, RBR_DEN_BAND)  # 11-20
 
-        # Relative bandpowers 
-        data[f"{prefix}_delta_rel"][k] = delta / total if np.isfinite(delta) else np.nan
-        data[f"{prefix}_theta_rel"][k] = theta / total if np.isfinite(theta) else np.nan
-        data[f"{prefix}_alpha_rel"][k] = alpha / total if np.isfinite(alpha) else np.nan
-        data[f"{prefix}_beta_rel"][k]  = beta  / total if np.isfinite(beta)  else np.nan
-        data[f"{prefix}_gamma_rel"][k] = gamma / total if np.isfinite(gamma) else np.nan
+		if np.isfinite(p_num) and np.isfinite(p_den) and (p_num > 0) and (p_den > 0):
+			data[f"{prefix}_rbr"][k] = np.log10(p_num / p_den)
 
-    out = pd.DataFrame(data, index=t_grid)
-    out.index.name = "time_sec"
-    return out
+		# Relative bandpowers 
+		data[f"{prefix}_delta_rel"][k] = delta / total if np.isfinite(delta) else np.nan
+		data[f"{prefix}_theta_rel"][k] = theta / total if np.isfinite(theta) else np.nan
+		data[f"{prefix}_alpha_rel"][k] = alpha / total if np.isfinite(alpha) else np.nan
+		data[f"{prefix}_beta_rel"][k]  = beta  / total if np.isfinite(beta)  else np.nan
+		data[f"{prefix}_gamma_rel"][k] = gamma / total if np.isfinite(gamma) else np.nan
+
+	out = pd.DataFrame(data, index=t_grid)
+	out.index.name = "time_sec"
+	return out
 
 
 def process_case(case_id):
@@ -261,6 +269,8 @@ def process_case(case_id):
 					v1 = feats1.loc[idx, c1]
 					v2 = feats2.loc[idx, c2]
 					avg_data[cavg] = (v1 + v2) / 2.0
+				avg_data["EEGavg_rbr"] = (feats1.loc[idx, "EEG1_rbr"] + feats2.loc[idx, "EEG2_rbr"]) / 2.0
+
 				feats_avg = pd.DataFrame(avg_data, index=idx)
 				psd_feats_list.append(feats_avg)
 
@@ -290,10 +300,14 @@ def process_case(case_id):
 		feats_wide = psd_feats.copy()
 		feats_wide.index = feats_wide.index.astype("int64")
 		feats_wide.index.name = "time_sec"
-
+		
+		overlap_cols = df_existing.columns.intersection(feats_wide.columns)
+		if len(overlap_cols) > 0:
+			df_existing = df_existing.drop(columns=overlap_cols)
+		
 		# Left-join
 		df_out = df_existing.join(feats_wide, how="left")
-
+		
 		# Restore original row order and Time column position (Time must remain first column)
 		df_out = df_out.sort_index()
 
